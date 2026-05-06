@@ -50,6 +50,9 @@ diff:          { sub: 0, credits: 0 }      ← zero cost on Unlimited
 | Three-step media upload (`/media/batch` → S3 → confirm) | ✅ verified | media id `963ede9e-a75f-4d5a-9869-da266044f651` |
 | `seedance_2_0`                                       | ⚠️ partial  | submission works, multi-image confirmed; full param table not yet documented |
 | Kling / Veo / Sora / Wan models                      | ⚠️ unverified | should work — same `/jobs/v2/{type}` shape, but each model has its own param schema |
+| Nano Banana Pro image realm slug = `nano-banana-2`   | ✅ verified | server returns `405` for `nano-banana-pro`, `403` (DataDome) for `nano-banana-2` — the latter is the real route |
+| Image realm body shape (`use_unlim` doubled, `use_seedream_bonus`, lowercase `1k`) | ✅ verified | request 574 captured from live web Generate click, body printed in the README |
+| Image submission via API end-to-end                  | ⚠️ pending  | DataDome challenge interrupted the test mid-session; the script's headless profile (separate from the test browser) shouldn't trip it |
 
 Workspace tested: `f113ce73-37cd-4be0-98ea-4331b1fd2b49` (Ahoum design team plan), `has_flex_unlim:true`.
 
@@ -68,7 +71,7 @@ In our tests, a single Seedance 2.0 1080p click with the toggle off cost **8,000
 
 ---
 
-## Quickstart
+## Quickstart (video)
 
 Requires **Node 18+** and a Higgsfield account with the Unlimited entitlement (`has_flex_unlim:true` or `has_unlim:true` on `/user`). Tested on macOS / Linux.
 
@@ -106,6 +109,33 @@ node src/index.mjs gen kling_omni_flf \
 
 Every run prints the wallet diff at the end, so you always see whether unlimited was honored.
 
+### Quickstart (image)
+
+```bash
+# Text-to-image — Nano Banana Pro (UI label) = job_set_type "nano_banana_2"
+node src/index.mjs image nano_banana_2 \
+  --prompt "minimalist line art ahoum logo, white background, vector style" \
+  --ar 1:1 --res 1k --width 1024 --height 1024 --batch 1
+
+# Image-to-image — auto-uploads ./ref.png and adds it to params.input_images[]
+node src/index.mjs image nano_banana_2 \
+  --prompt "redraw <<<image_1>>> in cyberpunk neon style" \
+  --input-image ./ref.png \
+  --ar 1:1 --res 1k --width 1024 --height 1024
+
+# Multiple inputs (composable references)
+node src/index.mjs image nano_banana_2 \
+  --prompt "<<<image_1>>> wearing the outfit from <<<image_2>>>" \
+  --input-image ./person.png --input-image ./outfit.png \
+  --ar 3:4 --res 1k --width 768 --height 1024
+
+# Pre-uploaded inputs (faster on repeated runs)
+node src/index.mjs image nano_banana_2 \
+  --prompt "redraw <<<image_1>>>" \
+  --input-image-id  abc-123-… \
+  --input-image-url https://d2ol7oe51mr4n9.cloudfront.net/.../abc-123-….png
+```
+
 ---
 
 ## Why this exists
@@ -134,9 +164,36 @@ The web's "Generate Unlimited" button hits `POST /jobs/v2/{job_set_type}` with `
 | `login`                          | Open a real Chromium, sign in, persist cookies on disk. **One-time.** |
 | `whoami`                         | Print user, plan, entitlements, wallet snapshot.        |
 | `upload <file> [--surface <s>]`  | Three-step upload to Higgsfield's media store. Prints `{id, url}`. |
-| `gen <job_set_type> [opts]`      | Submit a job, poll until done, print video URL + wallet diff. |
+| `gen <job_set_type> [opts]`      | Submit a **video** job — `POST /jobs/v2/{snake_case}`. Polls to done. |
+| `image <job_set_type> [opts]`    | Submit an **image** job — `POST /jobs/{kebab-case}`. Different endpoint, different body shape. |
 
 Run any command with no args for inline usage.
+
+### Video vs image realms
+
+Higgsfield splits the API into two job realms with different conventions:
+
+|                       | Video (`gen`)                                  | Image (`image`)                                                          |
+| --------------------- | ---------------------------------------------- | ------------------------------------------------------------------------ |
+| URL                   | `POST /jobs/v2/{job_set_type}`                | `POST /jobs/{kebab-slug}` (script auto-converts `_` → `-`)              |
+| `job_set_type` casing | snake_case (e.g. `seedance1_5`, `seedance_2_0`) | snake_case CLI input → kebab-case URL (`nano_banana_2` → `nano-banana-2`) |
+| Resolution            | `"480p"`, `"720p"`, `"1080p"`                 | `"1k"`, `"2k"`, `"4k"` (lowercase!)                                      |
+| Conditioning images   | `params.medias[]` with `role`                  | `params.input_images[]` (no role field)                                  |
+| `use_unlim:true`      | top-level only                                 | **both top-level AND inside `params`**                                   |
+| Free-tier toggle      | `use_free_gens`                                | `use_seedream_bonus`                                                     |
+| Other params          | `duration`, `aspect_ratio`, `medias`, `model`  | `batch_size`, `is_storyboard`, `is_zoom_control`, no `model`             |
+
+**UI display name → API slug** can be confusing:
+
+| Web UI label          | API job_set_type    | URL slug              |
+| --------------------- | ------------------- | --------------------- |
+| Nano Banana Pro       | `nano_banana_2`     | `nano-banana-2`       |
+| Nano Banana           | `nano_banana`       | `nano-banana`         |
+| Nano Banana Flash     | `nano_banana_flash` | `nano-banana-flash`   |
+| Seedance 2.0          | `seedance_2_0`      | (video, uses `/v2/`)  |
+| Seedance 1.5 Pro      | `seedance1_5`       | (video, uses `/v2/`)  |
+
+The "Pro" / "Flash" / "v2" naming in the UI doesn't match the API in obvious ways — `nano-banana-pro` returns 405 from the server; the actual slug is `nano-banana-2`. Verified via 405 vs 403 probe (404 = no route, 403 = route exists but DataDome blocking).
 
 ---
 
@@ -321,6 +378,36 @@ Submit a job. **The endpoint we care about.**
     "jobs": [{ "id": "<job_id>", "status": "queued", ... }],
     ...
   }],
+  "has_more": false
+}
+```
+
+### `POST /jobs/{kebab-slug}` (image realm)
+Submit an image-generation job. Distinct from `/jobs/v2/*` — different body shape.
+
+```jsonc
+// Request — captured live from "Nano Banana Pro" Generate click
+{
+  "params": {
+    "prompt": "test ahoum logo",
+    "input_images": [],         // optional image-to-image refs (media_input shape)
+    "width": 896,
+    "height": 1200,
+    "batch_size": 1,
+    "aspect_ratio": "3:4",
+    "is_storyboard": false,
+    "is_zoom_control": false,
+    "use_unlim": true,          // ← duplicated inside params
+    "resolution": "1k"          // ← lowercase!
+  },
+  "use_unlim": true,            // ← also at top level
+  "use_seedream_bonus": false
+}
+
+// Response (200) — same shape as the video realm
+{
+  "id": "<project_id>",
+  "job_sets": [{ "id":"...", "type":"nano_banana_2", "jobs":[{ "id":"...", "status":"queued" }], ... }],
   "has_more": false
 }
 ```

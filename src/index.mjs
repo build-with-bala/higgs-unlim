@@ -5,7 +5,18 @@
 //   higgs-unlim login                                 # one-time interactive login
 //   higgs-unlim whoami                                # session/wallet sanity check
 //   higgs-unlim upload <file>                         # upload a media file, print id+url
-//   higgs-unlim gen <job_set_type> [opts]             # submit a job and poll to done
+//   higgs-unlim gen <job_set_type> [opts]             # submit a VIDEO job (POST /jobs/v2/{snake_case})
+//   higgs-unlim image <job_set_type> [opts]           # submit an IMAGE job (POST /jobs/{kebab-case})
+//
+// Image example (Nano Banana Pro = job_set_type "nano_banana_2"):
+//   higgs-unlim image nano_banana_2 \
+//     --prompt "minimalist line art ahoum logo, white background" \
+//     --ar 1:1 --res 1k --width 1024 --height 1024 --batch 1
+//
+// Image-to-image (auto-uploads files into params.input_images):
+//   higgs-unlim image nano_banana_2 \
+//     --prompt "redraw <<<image_1>>> in cyberpunk style" \
+//     --input-image ./ref.png
 //
 // gen options:
 //   --prompt "<text>"                  prompt (default: "test")
@@ -36,7 +47,7 @@
 import path from 'node:path';
 import { openContext, ensureLoggedIn, PROFILE_DIR } from './auth.mjs';
 import { uploadFile, mediaEntry } from './upload.mjs';
-import { submitJob, pollJob, getWallet, getUser } from './jobs.mjs';
+import { submitJob, submitImageJob, pollJob, getWallet, getUser } from './jobs.mjs';
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -233,16 +244,112 @@ async function cmdGen(rest) {
   });
 }
 
+async function cmdImage(rest) {
+  const args = parseArgs(rest);
+  const jobSetType = args._[0];
+  if (!jobSetType) die('usage: higgs-unlim image <job_set_type> [--prompt "..."] [--ar 1:1] [--res 1k|2k|4k] [--width N --height N] [--batch N] [--input-image <path>]... [--seed N] [--no-unlim] [--extra k=v]...');
+
+  await withCtx(true, async page => {
+    if (!await ensureLoggedIn(page)) die('Not signed in. Run `higgs-unlim login` first.');
+
+    // Resolve any --input-image local files (auto-upload). Repeatable.
+    const inputImageEntries = [];
+    const ips = args['input-image'] ? (Array.isArray(args['input-image']) ? args['input-image'] : [args['input-image']]) : [];
+    for (const p of ips) {
+      console.log('uploading input-image:', p);
+      const m = await uploadFile(page, p, { surface: 'nano_banana_2' });
+      inputImageEntries.push({ id: m.id, url: m.url, type: 'media_input' });
+    }
+    // Or pre-uploaded ids/urls (parallel arrays)
+    const ids = args['input-image-id'] ? (Array.isArray(args['input-image-id']) ? args['input-image-id'] : [args['input-image-id']]) : [];
+    const urls = args['input-image-url'] ? (Array.isArray(args['input-image-url']) ? args['input-image-url'] : [args['input-image-url']]) : [];
+    for (let i = 0; i < Math.min(ids.length, urls.length); i++) {
+      inputImageEntries.push({ id: ids[i], url: urls[i], type: 'media_input' });
+    }
+
+    const useUnlim = !args['no-unlim'];
+
+    const params = {
+      prompt: args.prompt || 'test',
+      input_images: inputImageEntries,
+      width: args.width ? parseInt(args.width, 10) : 1024,
+      height: args.height ? parseInt(args.height, 10) : 1024,
+      batch_size: args.batch ? parseInt(args.batch, 10) : 1,
+      aspect_ratio: args.ar || '1:1',
+      is_storyboard: !!args['storyboard'],
+      is_zoom_control: !!args['zoom-control'],
+      use_unlim: useUnlim,                  // image realm: ALSO inside params
+      resolution: (args.res || '1k').toLowerCase(),
+    };
+    if (args.seed) params.seed = parseInt(args.seed, 10);
+
+    if (args.extra) {
+      const list = Array.isArray(args.extra) ? args.extra : [args.extra];
+      for (const kv of list) {
+        const [k, ...rest] = String(kv).split('=');
+        params[k] = coerce(rest.join('='));
+      }
+    }
+
+    const body = {
+      params,
+      use_unlim: useUnlim,                  // and at top level
+      use_seedream_bonus: !!args['seedream-bonus'],
+    };
+    if (args['param-extra']) {
+      const list = Array.isArray(args['param-extra']) ? args['param-extra'] : [args['param-extra']];
+      for (const kv of list) {
+        const [k, ...rest] = String(kv).split('=');
+        body[k] = coerce(rest.join('='));
+      }
+    }
+
+    const w0 = await getWallet(page);
+    console.log('wallet before:', { sub: w0.subscription_balance, credits: w0.credits_balance });
+    console.log('submitting:', jobSetType, '(image)', 'use_unlim:', useUnlim, 'inputs:', inputImageEntries.length);
+
+    const submit = await submitImageJob(page, jobSetType, body);
+    if (submit.status !== 200) {
+      console.error('submit failed:', submit.status, typeof submit.body === 'string' ? submit.body.slice(0, 300) : JSON.stringify(submit.body, null, 2));
+      process.exit(1);
+    }
+    const jobId = submit.body?.job_sets?.[0]?.jobs?.[0]?.id;
+    console.log('job id:', jobId);
+
+    const result = await pollJob(page, jobId, {
+      intervalMs: 2000,
+      onTick: ({ iter, status }) => {
+        process.stdout.write(`\r  iter ${iter} status=${status}${' '.repeat(20)}`);
+      },
+    });
+    process.stdout.write('\n');
+
+    const final = result.body;
+    const imgUrl = final?.results?.raw?.url || final?.result?.url;
+    if (imgUrl) console.log('image:', imgUrl);
+    const thumb = final?.results?.raw?.thumbnail_url;
+    if (thumb) console.log('thumb:', thumb);
+    if (!imgUrl) console.log('final:', JSON.stringify(final, null, 2));
+
+    const w1 = await getWallet(page);
+    console.log('wallet after: ', { sub: w1.subscription_balance, credits: w1.credits_balance });
+    console.log('diff:         ', {
+      sub: w0.subscription_balance - w1.subscription_balance,
+      credits: w0.credits_balance - w1.credits_balance,
+    });
+  });
+}
+
 function die(msg) {
   console.error(msg);
   process.exit(2);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
-const map = { login: cmdLogin, whoami: cmdWhoami, upload: cmdUpload, gen: cmdGen };
+const map = { login: cmdLogin, whoami: cmdWhoami, upload: cmdUpload, gen: cmdGen, image: cmdImage };
 const fn = map[cmd];
 if (!fn) {
-  console.error('commands: login | whoami | upload <file> | gen <job_set_type> [opts]');
+  console.error('commands: login | whoami | upload <file> | gen <job_set_type> [opts] | image <job_set_type> [opts]');
   process.exit(2);
 }
 fn(rest).catch(e => { console.error(e?.stack || e); process.exit(1); });
