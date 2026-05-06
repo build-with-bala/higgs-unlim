@@ -1,0 +1,10 @@
+node_modules/
+package-lock.json
+.DS_Store
+*.log
+.env
+.env.local
+
+# never commit the persistent browser profile (cookies, auth state)
+profile/
+.playwright-profile/

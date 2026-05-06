@@ -1,0 +1,22 @@
+{
+  "name": "higgs-unlim",
+  "version": "0.1.0",
+  "description": "CLI wrapper for Higgsfield's web /jobs/v2 API with use_unlim:true support, including start/end frame image inputs",
+  "type": "module",
+  "bin": {
+    "higgs-unlim": "src/index.mjs"
+  },
+  "scripts": {
+    "login": "node src/index.mjs login",
+    "whoami": "node src/index.mjs whoami",
+    "gen": "node src/index.mjs gen",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}
