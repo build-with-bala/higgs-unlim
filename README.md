@@ -21,19 +21,22 @@ diff:          { sub: 0, credits: 0 }      ← zero cost on Unlimited
 
 1. [Status & verification](#status--verification)
 2. [⚠️ The web UI's "Generate" billing trap](#-the-web-uis-generate-billing-trap)
-3. [Quickstart](#quickstart)
-4. [Why this exists](#why-this-exists)
-5. [Commands](#commands)
-6. [`gen` options](#gen-options)
-7. [Image inputs](#image-inputs)
-8. [Per-model schema](#per-model-schema)
-9. [Job set types](#job-set-types)
-10. [API reference](#api-reference)
-11. [How it works](#how-it-works)
-12. [Architecture](#architecture)
-13. [Troubleshooting](#troubleshooting)
-14. [FAQ](#faq)
-15. [Limits & disclaimers](#limits--disclaimers)
+3. [Quickstart (video)](#quickstart-video)
+4. [Quickstart (image)](#quickstart-image)
+5. [Why this exists](#why-this-exists)
+6. [Commands](#commands)
+7. [Video vs image realms](#video-vs-image-realms)
+8. [`gen` options (video)](#gen-options-video)
+9. [`image` options](#image-options)
+10. [Image inputs (video realm)](#image-inputs)
+11. [Per-model schema](#per-model-schema)
+12. [Job set types](#job-set-types)
+13. [API reference](#api-reference)
+14. [How it works](#how-it-works)
+15. [Architecture](#architecture)
+16. [Troubleshooting](#troubleshooting)
+17. [FAQ](#faq)
+18. [Limits & disclaimers](#limits--disclaimers)
 
 ---
 
@@ -197,7 +200,7 @@ The "Pro" / "Flash" / "v2" naming in the UI doesn't match the API in obvious way
 
 ---
 
-## `gen` options
+## `gen` options (video)
 
 | Flag                              | Default       | Notes                                                 |
 | --------------------------------- | ------------- | ----------------------------------------------------- |
@@ -223,9 +226,38 @@ The "Pro" / "Flash" / "v2" naming in the UI doesn't match the API in obvious way
 
 ---
 
+## `image` options
+
+For text-to-image / image-to-image jobs (Nano Banana Pro et al.). Distinct from `gen` because the image realm uses a different endpoint and body shape.
+
+| Flag                              | Default       | Notes                                                 |
+| --------------------------------- | ------------- | ----------------------------------------------------- |
+| `--prompt "<text>"`               | `"test"`      | Prompt. Can include `<<<image_N>>>` placeholders for input images and `<<<uuid>>>` for saved character references. |
+| `--ar <1:1\|3:4\|4:3\|9:16\|16:9>` | `1:1`        | Aspect ratio.                                         |
+| `--res <1k\|2k\|4k>`              | `1k`          | Resolution. **Lowercase** (server validates).         |
+| `--width <px>`                    | `1024`        | Pixel width.                                          |
+| `--height <px>`                   | `1024`        | Pixel height.                                         |
+| `--batch <N>`                     | `1`           | `batch_size` — number of variations to generate (typically 1–4). |
+| `--seed <int>`                    | random        | For reproducible runs.                                |
+| `--input-image <path>`            | —             | Local file → auto-uploaded → appended to `params.input_images[]`. **Repeatable.** |
+| `--input-image-id <uuid>`         | —             | Pre-uploaded media id (use with `--input-image-url`). Repeatable; pair with matching `--input-image-url` in the same order. |
+| `--input-image-url <url>`         | —             | Pre-uploaded media URL.                               |
+| `--storyboard`                    | off           | `is_storyboard:true`. Used for multi-shot composition. |
+| `--zoom-control`                  | off           | `is_zoom_control:true`. Used by `nano_banana_2_zooms`. |
+| `--no-unlim`                      | off           | Force `use_unlim:false` (charges credits). Mirrors the same flag everywhere. |
+| `--seedream-bonus`                | off           | `use_seedream_bonus:true` (image realm's free-pool toggle). |
+| `--extra k=v`                     | —             | Push arbitrary key into `params`. Repeatable.         |
+| `--param-extra k=v`               | —             | Push arbitrary key into the top-level body. Repeatable. |
+
+`<<<image_N>>>` placeholders inside `--prompt` map to `params.input_images[N-1]` — same 1-based indexing convention as the video realm's `medias`.
+
+---
+
 ## Image inputs
 
-Higgsfield jobs accept conditioning images via the `medias` array:
+> This section is about **video** jobs that take conditioning images (start/end frames, references). For pure text-to-image or image-to-image with Nano Banana / Seedream / etc., see [`image` options](#image-options) above and the [Quickstart (image)](#quickstart-image).
+
+Higgsfield video jobs accept conditioning images via the `medias` array:
 
 ```json
 "medias": [
@@ -541,6 +573,17 @@ The model rejected one or more params. Read the `loc` array in the response — 
 - `"loc":["medias"]` `"too_long"` → exceeded the model's `medias` cap. See [Per-model schema](#per-model-schema).
 - `"loc":["width"]` / `"loc":["height"]` `"missing"` → Seedance 1.5 needs explicit `--width` and `--height`.
 - `"loc":["resolution"]` → unsupported resolution tier for that model.
+
+**Submit returns HTTP 403 with an HTML page mentioning "captcha-delivery"**
+DataDome bot protection has flagged your session. This is the most common failure mode when running automation against the image realm in particular. Two ways out:
+
+1. **Solve the challenge in a visible browser**: run `node src/index.mjs login` again — the headed window will let you complete the captcha. After one successful interaction, the cookie unblocks and the headless flows resume.
+2. **Slow down**: DataDome trips on rapid sequential POSTs. The CLI as written is sequential by design. If you're scripting many jobs, add `await new Promise(r => setTimeout(r, 1500))` between submissions or read the `Retry-After` header on 403.
+
+You'll know you're past it when the body of a 403 response is HTML containing `geo.captcha-delivery.com`, vs the JSON `{"detail":"..."}` of a real API rejection.
+
+**Submit returns HTTP 405 `Method Not Allowed`**
+The job_set_type slug doesn't exist on the server. The image realm uses kebab-case slugs that don't always match the UI label — e.g. "Nano Banana Pro" is `nano_banana_2`, not `nano_banana_pro`. See the [UI label → API slug](#video-vs-image-realms) table.
 
 **Submit returns HTTP 503 with `{"detail":"blocked-by-test"}`**
 That's a self-test artifact, not a real response — it means an old fetch interceptor is still installed in the page. Restart with a fresh `node` invocation.
