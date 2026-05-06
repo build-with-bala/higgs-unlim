@@ -169,6 +169,32 @@ node src/index.mjs gen seedance1_5 \
 
 Not every model accepts both `start_image` and `end_image`; check the table below.
 
+### Inline image tagging in the prompt (`<<<image_N>>>`)
+
+The web's `@Image 1`, `@Image 2` mentions translate to `<<<image_N>>>` placeholders in the prompt body, where `N` is the **1-based index of the image in the `medias` array**. The first media (regardless of `role`) becomes `<<<image_1>>>`, the second becomes `<<<image_2>>>`, and so on.
+
+```bash
+node src/index.mjs gen seedance1_5 \
+  --prompt "monkey is sitting in meditation in <<<image_1>>> and walks left into <<<image_2>>>" \
+  --duration 8 --res 720p --ar 3:4 \
+  --width 720 --height 960 \
+  --start-image ./scene_a.png \
+  --end-image   ./scene_b.png
+```
+
+You can also reference characters / saved reference elements by their UUID with the same syntax: `<<<5c98e2e7-faee-4bcf-93b8-b75ff41c68ef>>>`. The character UUID is what the web app inserts when you `@`-mention a saved character. (Seedance 1.5 has no `reference_elements` parameter slot, so the placeholder lives only in the prompt text — Seedance 2.0 honors it more thoroughly.)
+
+### Per-model media caps (server-enforced)
+
+| Model                         | Max `medias` items | Roles supported            | Notes                                  |
+| ----------------------------- | ------------------ | -------------------------- | -------------------------------------- |
+| `seedance1_5`                 | **2**              | `start_image`, `end_image` | Requires explicit `width` + `height`. Resolutions: `480p`, `720p`. |
+| `seedance_2_0`                | 3+                 | `start_image`, `end_image`, `image` | Supports a third generic `image` role for additional inline mentions. Resolutions up to `1080p`. |
+| `kling_omni_flf`, `kling_o3_flf` | 2               | `start_image`, `end_image` | First-Last-Frame morph models.          |
+| `kling_omni_image_reference`, `kling_video_reference`, `kling_o3_image_reference` | varies | `image` (reference), sometimes `start_image` | Reference-driven; check the web UI for limits. |
+
+If you blow the cap (e.g. send 3 medias to `seedance1_5`), the server returns `422` with `{"detail":[{"type":"too_long","loc":["medias"],"msg":"List should have at most 2 items..."}]}`. You'll see this clearly in the script's stderr output.
+
 ---
 
 ## Job set types
