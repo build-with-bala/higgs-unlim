@@ -15,10 +15,25 @@
 // the page's cookies (Clerk __client/__session, datadome) and the Clerk SDK's
 // auto-refreshed JWT.
 
-import { chromium } from 'playwright';
+// Use playwright-extra + the puppeteer-extra-plugin-stealth bundle so the
+// launched browser doesn't leak the obvious "I'm an automation" tells that
+// DataDome / Cloudflare / Imperva pin on. Patches WebGL vendor/renderer,
+// navigator.plugins/languages, navigator.webdriver, chrome.runtime,
+// permissions API quirks, canvas / audio context fingerprints, etc.
+//
+// Set HIGGS_STEALTH=0 to opt out (e.g. when debugging, or if a future
+// stealth update breaks Higgsfield's own JS).
+import { chromium as chromiumPlain } from 'playwright';
+import { chromium as chromiumExtra } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
+
+if (process.env.HIGGS_STEALTH !== '0') {
+  chromiumExtra.use(StealthPlugin());
+}
+const chromium = process.env.HIGGS_STEALTH === '0' ? chromiumPlain : chromiumExtra;
 
 const HF_DIR = path.join(os.homedir(), '.config', 'higgsfield');
 
