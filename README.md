@@ -164,8 +164,9 @@ The web's "Generate Unlimited" button hits `POST /jobs/v2/{job_set_type}` with `
 
 | Command                          | What it does                                            |
 | -------------------------------- | ------------------------------------------------------- |
-| `login`                          | Open a real Chromium, sign in, persist cookies on disk. **One-time.** |
+| `login`                          | Open a real Chromium, sign in, write cookies to `~/.config/higgsfield/state.json`. **One-time.** |
 | `whoami`                         | Print user, plan, entitlements, wallet snapshot.        |
+| `doctor`                         | Diagnose setup: state file, deps, Clerk session, wallet GET, jobs GET. Run this first when something breaks. |
 | `upload <file> [--surface <s>]`  | Three-step upload to Higgsfield's media store. Prints `{id, url}`. |
 | `gen <job_set_type> [opts]`      | Submit a **video** job — `POST /jobs/v2/{snake_case}`. Polls to done. |
 | `image <job_set_type> [opts]`    | Submit an **image** job — `POST /jobs/{kebab-case}`. Different endpoint, different body shape. |
@@ -502,24 +503,35 @@ POST /media/{id}/upload
 ## How it works
 
 ```
-~/.config/higgsfield/playwright-profile/   (persistent cookies on disk)
+~/.config/higgsfield/state.json   (Playwright storageState — cookies + origins)
         │
         ▼
-launchPersistentContext(headless)
+chromium.launch({ headless, channel: 'chrome', anti-fingerprint flags })
         │
         ▼
-page.goto("https://higgsfield.ai/ai/video")   ← Clerk SDK hydrates, sets cookies
+context.newContext({ storageState })   ← imports the cookies
         │
+        ▼
+context.addInitScript(...)             ← stash window.__rawFetch BEFORE page JS,
+                                         hide navigator.webdriver, normalize languages
+        │
+        ▼
+page.goto("https://higgsfield.ai/ai/video" or "/ai/image")
+        │ (Clerk SDK hydrates, datadome cookie is minted, cf_clearance lands)
         ▼
 page.evaluate(async () => {
    const jwt = await window.Clerk.session.getToken();          // auto-refreshed by SDK
    const dd  = document.cookie.match(/datadome=([^;]+)/)[1];   // bot-protection token
-   return fetch("https://fnf.higgsfield.ai/jobs/v2/...", {
+   const f   = window.__rawFetch || window.fetch;              // bypass Sentry/soul.js wrappers
+   return f("https://fnf.higgsfield.ai/jobs/v2/... or /jobs/...", {
      method: "POST", credentials: "include",
      headers: { Authorization: "Bearer " + jwt, "x-datadome-clientid": dd, ... },
-     body: JSON.stringify({ params, use_unlim: true, use_free_gens: false }),
+     body: JSON.stringify({ params, use_unlim: true, ... }),
    });
 })
+        │
+        ▼
+on close: context.storageState() → state.json   (refreshed cookies persisted)
 ```
 
 By running every API call from inside `page.evaluate()`, we inherit:
@@ -556,7 +568,13 @@ The browser context is opened once per command and closed at the end, so command
 ## Troubleshooting
 
 **`Not signed in. Run \`higgs-unlim login\` first.`**
-The persistent profile at `~/.config/higgsfield/playwright-profile/` doesn't have a Clerk session, or it's expired. Run `node src/index.mjs login` — Chromium opens, you sign in, cookies persist.
+The state file at `~/.config/higgsfield/state.json` doesn't have a Clerk session, or the cookies expired. Run `node src/index.mjs login` — a Chromium window opens, you sign in once, the script writes a fresh `state.json` and closes. You only do this once per workstation.
+
+**`Cannot find package 'playwright'`**
+You skipped `npm install` after cloning. From the repo root:
+```bash
+npm install         # installs deps + runs `playwright install chromium` via postinstall
+```
 
 **Submit returns HTTP 401**
 Either the profile is corrupted (rare) or higgsfield invalidated your session. Delete the profile dir and re-login:
@@ -574,13 +592,19 @@ The model rejected one or more params. Read the `loc` array in the response — 
 - `"loc":["width"]` / `"loc":["height"]` `"missing"` → Seedance 1.5 needs explicit `--width` and `--height`.
 - `"loc":["resolution"]` → unsupported resolution tier for that model.
 
-**Submit returns HTTP 403 with an HTML page mentioning "captcha-delivery"**
-DataDome bot protection has flagged your session. This is the most common failure mode when running automation against the image realm in particular. Two ways out:
+**Submit returns HTTP 403 with body `{"error":"datadome_or_cloudflare", ...}`**
+Bot protection (DataDome or Cloudflare) is challenging the request. The script auto-detects the HTML challenge response and translates it into this clean error so you know it's a network-trust issue, not a bug in your params.
 
-1. **Solve the challenge in a visible browser**: run `node src/index.mjs login` again — the headed window will let you complete the captcha. After one successful interaction, the cookie unblocks and the headless flows resume.
-2. **Slow down**: DataDome trips on rapid sequential POSTs. The CLI as written is sequential by design. If you're scripting many jobs, add `await new Promise(r => setTimeout(r, 1500))` between submissions or read the `Retry-After` header on 403.
+Three ways out, fastest first:
 
-You'll know you're past it when the body of a 403 response is HTML containing `geo.captcha-delivery.com`, vs the JSON `{"detail":"..."}` of a real API rejection.
+1. **Re-run with `HIGGS_HEADED=1`**: opens a visible Chromium. If a captcha appears, solve it once; the resulting cookie clears the block for ~5–60 min. The script then writes the refreshed `state.json` automatically on close.
+   ```bash
+   HIGGS_HEADED=1 node src/index.mjs image nano_banana_2 --prompt "..."
+   ```
+2. **Wait it out.** DataDome trust scores recover after 15–60 min of no activity. GETs (`whoami`, `doctor`) usually still work during this window — only the POSTs are gated. Don't keep retrying; that just resets the cooldown.
+3. **Run from a residential IP.** DataDome scores datacenter / VPN IPs more harshly. If you're SSH'd into a cloud box, run the CLI from your laptop instead.
+
+Symptom check: response body contains `geo.captcha-delivery.com` (DataDome) or `cf-chl` / `Just a moment` (Cloudflare). The JSON `{"detail":"..."}` shape is a real API rejection (different problem — see 422 / 405 below).
 
 **Submit returns HTTP 405 `Method Not Allowed`**
 The job_set_type slug doesn't exist on the server. The image realm uses kebab-case slugs that don't always match the UI label — e.g. "Nano Banana Pro" is `nano_banana_2`, not `nano_banana_pro`. See the [UI label → API slug](#video-vs-image-realms) table.

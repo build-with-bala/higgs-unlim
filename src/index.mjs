@@ -45,7 +45,7 @@
 //     --start-image ./first.png --end-image ./last.png
 
 import path from 'node:path';
-import { openContext, ensureLoggedIn, PROFILE_DIR } from './auth.mjs';
+import { openContext, ensureLoggedIn, PROFILE_DIR, STATE_FILE } from './auth.mjs';
 import { uploadFile, mediaEntry } from './upload.mjs';
 import { submitJob, submitImageJob, pollJob, getWallet, getUser } from './jobs.mjs';
 
@@ -79,20 +79,41 @@ function coerce(v) {
 }
 
 async function withCtx(headless, fn) {
-  const ctx = await openContext({ headless });
+  // HIGGS_HEADED=1 forces a visible browser (useful when DataDome / Cloudflare
+  // are challenging the headless instance — you can solve a captcha live).
+  const wantHeaded = process.env.HIGGS_HEADED === '1';
+  const handle = await openContext({ headless: wantHeaded ? false : headless });
   try {
-    const page = await ctx.newPage();
+    const page = await handle.context.newPage();
+    if (process.env.HIGGS_DEBUG_NET === '1') {
+      const interesting = u => /fnf\.higgsfield|jobs|cors|preflight/.test(u);
+      page.on('request', req => {
+        if (interesting(req.url())) console.error('[req]', req.method(), req.url().slice(0, 100));
+      });
+      page.on('requestfailed', req => {
+        if (interesting(req.url())) console.error('[failed]', req.method(), req.url().slice(0, 100), '|', req.failure()?.errorText);
+      });
+      page.on('response', async res => {
+        if (interesting(res.url())) {
+          const acao = res.headers()['access-control-allow-origin'];
+          const aam = res.headers()['access-control-allow-methods'];
+          const aah = res.headers()['access-control-allow-headers'];
+          console.error('[res]', res.status(), res.request().method(), res.url().slice(0, 100), acao ? `acao=${acao}` : '', aam ? `aam=${aam}` : '', aah ? `aah=${aah}`.slice(0,80) : '');
+        }
+      });
+    }
     return await fn(page);
   } finally {
-    await ctx.close();
+    await handle.close();
   }
 }
 
 async function cmdLogin() {
   console.log('Opening Chromium for interactive login. Sign in via Google/Apple/Microsoft/Email.');
-  console.log('Profile dir:', PROFILE_DIR);
-  const ctx = await openContext({ headless: false });
-  const page = await ctx.newPage();
+  console.log('State file:', STATE_FILE);
+  // Always run login in state-file mode so the result is portable.
+  const handle = await openContext({ headless: false, mode: 'state' });
+  const page = await handle.context.newPage();
   await page.goto('https://higgsfield.ai/sign-in');
 
   console.log('Waiting for Clerk session to be detected. Press Ctrl+C to abort.');
@@ -104,14 +125,17 @@ async function cmdLogin() {
   }
   if (!signedIn) {
     console.error('Timed out waiting for sign-in.');
-    await ctx.close();
+    await handle.close(false);
     process.exit(1);
   }
-  // Navigate once to /ai/video so all auth state is fully primed
+  // Land on /ai/video so all auth state is fully primed (datadome cookie etc.)
   await page.goto('https://higgsfield.ai/ai/video', { waitUntil: 'domcontentloaded' });
   await new Promise(r => setTimeout(r, 2000));
-  console.log('Logged in. Cookies persisted to:', PROFILE_DIR);
-  await ctx.close();
+  // Also touch /ai/image so its surface-specific cookies land too
+  await page.goto('https://higgsfield.ai/ai/image?model=nano-banana-pro', { waitUntil: 'domcontentloaded' });
+  await new Promise(r => setTimeout(r, 2000));
+  console.log('Logged in. State written to:', STATE_FILE);
+  await handle.close(true);
 }
 
 async function cmdWhoami() {
@@ -216,6 +240,10 @@ async function cmdGen(rest) {
     const submit = await submitJob(page, jobSetType, body);
     if (submit.status !== 200) {
       console.error('submit failed:', submit.status, JSON.stringify(submit.body, null, 2));
+      if (submit.body?.error === 'datadome_or_cloudflare') {
+        console.error('\nTip: re-run with HIGGS_HEADED=1 to open a visible browser. If a captcha appears,');
+        console.error('solve it once — the script will pick up the trusted cookie automatically.');
+      }
       process.exit(1);
     }
     const jobId = submit.body?.job_sets?.[0]?.jobs?.[0]?.id;
@@ -250,7 +278,7 @@ async function cmdImage(rest) {
   if (!jobSetType) die('usage: higgs-unlim image <job_set_type> [--prompt "..."] [--ar 1:1] [--res 1k|2k|4k] [--width N --height N] [--batch N] [--input-image <path>]... [--seed N] [--no-unlim] [--extra k=v]...');
 
   await withCtx(true, async page => {
-    if (!await ensureLoggedIn(page)) die('Not signed in. Run `higgs-unlim login` first.');
+    if (!await ensureLoggedIn(page, { land: 'image' })) die('Not signed in. Run `higgs-unlim login` first.');
 
     // Resolve any --input-image local files (auto-upload). Repeatable.
     const inputImageEntries = [];
@@ -311,6 +339,10 @@ async function cmdImage(rest) {
     const submit = await submitImageJob(page, jobSetType, body);
     if (submit.status !== 200) {
       console.error('submit failed:', submit.status, typeof submit.body === 'string' ? submit.body.slice(0, 300) : JSON.stringify(submit.body, null, 2));
+      if (submit.body?.error === 'datadome_or_cloudflare') {
+        console.error('\nTip: re-run with HIGGS_HEADED=1 to open a visible browser. If a captcha appears,');
+        console.error('solve it once — the script will pick up the trusted cookie automatically.');
+      }
       process.exit(1);
     }
     const jobId = submit.body?.job_sets?.[0]?.jobs?.[0]?.id;
@@ -340,16 +372,53 @@ async function cmdImage(rest) {
   });
 }
 
+async function cmdDoctor() {
+  const fs = await import('node:fs');
+  console.log('Profile / state:');
+  console.log('  STATE_FILE :', STATE_FILE, fs.existsSync(STATE_FILE) ? 'OK' : 'MISSING (run `login`)');
+  console.log('  PROFILE_DIR:', PROFILE_DIR, fs.existsSync(PROFILE_DIR) ? 'present' : 'absent');
+  console.log('Runtime:');
+  console.log('  node       :', process.version);
+  try {
+    const pw = await import('playwright');
+    console.log('  playwright : present');
+  } catch (e) {
+    console.log('  playwright : MISSING — run `npm install` in this directory');
+    return;
+  }
+  try {
+    const handle = await openContext({ headless: process.env.HIGGS_HEADED === '1' ? false : true });
+    try {
+      const page = await handle.context.newPage();
+      const ok = await ensureLoggedIn(page);
+      console.log('  login      :', ok ? 'OK (Clerk session present)' : 'NOT signed in (run `login`)');
+      if (!ok) return;
+      const wallet = await (await import('./jobs.mjs')).getWallet(page);
+      console.log('  wallet GET :', wallet ? 'OK' : 'FAILED');
+      console.log('  sub_balance:', wallet?.subscription_balance);
+      // Probe one image-realm POST against /jobs/job-sets/costs (read-only) — actually
+      // there's no read-only image POST. Use /jobs/accessible GET as a proxy.
+      const acc = await (await import('./auth.mjs')).apiFetch(page, { method: 'GET', path: '/jobs/accessible?job_set_type=nano_banana_2&size=1' });
+      console.log('  jobs GET   :', acc.status === 200 ? 'OK' : `FAILED (${acc.status})`);
+      if (acc.status === 403 && acc.body?.error === 'datadome_or_cloudflare') {
+        console.log('             :', acc.body.detail);
+      }
+    } finally { await handle.close(); }
+  } catch (e) {
+    console.log('  doctor     : ERROR —', e?.message || e);
+  }
+}
+
 function die(msg) {
   console.error(msg);
   process.exit(2);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
-const map = { login: cmdLogin, whoami: cmdWhoami, upload: cmdUpload, gen: cmdGen, image: cmdImage };
+const map = { login: cmdLogin, whoami: cmdWhoami, doctor: cmdDoctor, upload: cmdUpload, gen: cmdGen, image: cmdImage };
 const fn = map[cmd];
 if (!fn) {
-  console.error('commands: login | whoami | upload <file> | gen <job_set_type> [opts] | image <job_set_type> [opts]');
+  console.error('commands: login | whoami | doctor | upload <file> | gen <job_set_type> [opts] | image <job_set_type> [opts]');
   process.exit(2);
 }
 fn(rest).catch(e => { console.error(e?.stack || e); process.exit(1); });
