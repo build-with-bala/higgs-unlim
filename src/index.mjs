@@ -249,9 +249,19 @@ async function cmdGen(rest) {
     const jobId = submit.body?.job_sets?.[0]?.jobs?.[0]?.id;
     console.log('job id:', jobId);
 
+    // Video models (Seedance, Veo, Sora, Kling) need ~60-180s before any
+    // result is ready. Polling sooner just burns API requests against
+    // datadome's quota. Defaults: 90s initial wait, 15s between polls.
+    // Override with --poll-initial-delay <ms> and --poll-interval <ms>.
+    const initialDelayMs = args['poll-initial-delay'] !== undefined
+      ? parseInt(args['poll-initial-delay'], 10) : 90_000;
+    const intervalMs = args['poll-interval'] !== undefined
+      ? parseInt(args['poll-interval'], 10) : 15_000;
     const result = await pollJob(page, jobId, {
+      initialDelayMs, intervalMs,
       onTick: ({ iter, status }) => {
-        process.stdout.write(`\r  iter ${iter} status=${status}${' '.repeat(20)}`);
+        const label = iter === -1 ? '' : ` iter ${iter}`;
+        process.stdout.write(`\r ${label} status=${status}${' '.repeat(40)}`);
       },
     });
     process.stdout.write('\n');

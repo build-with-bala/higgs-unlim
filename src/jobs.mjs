@@ -29,7 +29,28 @@ export async function submitImageJob(page, jobSetType, body) {
   return r;
 }
 
-export async function pollJob(page, jobId, { intervalMs = 2500, maxIters = 240, onTick } = {}) {
+// pollJob — poll /jobs/{id} until terminal status.
+//
+//   initialDelayMs : sleep BEFORE the first poll. Useful for slow models
+//                    where polling at second 0 just burns API requests.
+//                    e.g. Seedance video typically needs ≥60-90s before
+//                    anything is ready.
+//   intervalMs     : sleep between subsequent polls.
+//   maxIters       : max polls AFTER the initial delay.
+//   onTick         : called with { iter, ...job } after each poll.
+//
+// onTick still receives a `waiting` event at iter -1 if there is an initial
+// delay, so the UI can show a meaningful state during the first wait.
+export async function pollJob(page, jobId, {
+  initialDelayMs = 0,
+  intervalMs = 2500,
+  maxIters = 240,
+  onTick,
+} = {}) {
+  if (initialDelayMs > 0) {
+    if (onTick) onTick({ iter: -1, status: `waiting (first poll in ${Math.round(initialDelayMs/1000)}s)` });
+    await new Promise(res => setTimeout(res, initialDelayMs));
+  }
   let last = null;
   for (let i = 0; i < maxIters; i++) {
     const r = await apiFetch(page, { method: 'GET', path: `/jobs/${jobId}` });
