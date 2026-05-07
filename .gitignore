@@ -8,3 +8,4 @@ package-lock.json
 # never commit the persistent browser profile (cookies, auth state)
 profile/
 .playwright-profile/
+.gitignore
